@@ -1,0 +1,5 @@
+{
+  "name": "みんなのごはん",
+  "description": "病院職員向けの食事予約管理システム。栄養科による献立管理と職員の予約をサポートします。",
+  "requestFramePermissions": []
+}

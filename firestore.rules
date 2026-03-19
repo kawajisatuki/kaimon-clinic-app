@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (from Auth)
+    // Fields:
+    //   - id: string (required)
+    //   - username: string (required)
+    //   - name: string (required)
+    //   - role: string (required, 'student' | 'admin')
+    //
+    // Collection: menu
+    // Document ID: date_mealType (e.g., 2026-03-17_lunch)
+    // Fields:
+    //   - id: string (required)
+    //   - date: string (required, YYYY-MM-DD)
+    //   - meal_type: string (required, 'lunch' | 'dinner')
+    //   - title: string (required)
+    //   - description: string (optional)
+    //   - calories: number (optional)
+    //   - allergens: string (optional)
+    //
+    // Collection: reservations
+    // Document ID: userId_menuId or guest_timestamp
+    // Fields:
+    //   - id: string (required)
+    //   - user_id: string (optional, for staff)
+    //   - menu_id: string (required)
+    //   - status: string (required, 'reserved')
+    //   - consumed: boolean (required)
+    //   - guest_name: string (optional, for guests)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          request.auth.token.email == "satukikawaji@gmail.com" ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+        );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'username', 'name', 'role']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.username is string && data.username.size() > 0 &&
+             data.name is string && data.name.size() > 0 &&
+             data.role in ['student', 'admin'];
+    }
+
+    function isValidMenu(data) {
+      return data.keys().hasAll(['id', 'date', 'meal_type', 'title']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.date is string && data.date.matches("^\\d{4}-\\d{2}-\\d{2}$") &&
+             data.meal_type in ['lunch', 'dinner'] &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             (!('description' in data) || (data.description is string && data.description.size() < 1000)) &&
+             (!('calories' in data) || (data.calories is number && data.calories >= 0)) &&
+             (!('allergens' in data) || (data.allergens is string && data.allergens.size() < 500));
+    }
+
+    function isValidReservation(data) {
+      return data.keys().hasAll(['id', 'menu_id', 'status', 'consumed']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.menu_id is string && data.menu_id.size() > 0 &&
+             data.status is string &&
+             data.consumed is bool &&
+             (!('user_id' in data) || (data.user_id is string && data.user_id.size() > 0)) &&
+             (!('guest_name' in data) || (data.guest_name is string && data.guest_name.size() > 0 && data.guest_name.size() < 100)) &&
+             (!('date' in data) || (data.date is string && data.date.matches("^\\d{4}-\\d{2}-\\d{2}$"))) &&
+             (!('title' in data) || (data.title is string && data.title.size() > 0)) &&
+             (!('meal_type' in data) || (data.meal_type in ['lunch', 'dinner']));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      // Allow unauthenticated read for staff ID login search
+      allow read: if true; 
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /menu/{menuId} {
+      allow read: if true; // Menus are public
+      allow write, delete: if isAdmin();
+    }
+
+    match /reservations/{reservationId} {
+      // Allow everyone to read reservation status (needed for the UI to show counts/status)
+      allow read: if true;
+      
+      // Allow creation if data is valid. 
+      allow create: if isValidReservation(request.resource.data);
+      
+      // Allow updates/deletes if admin or if it's the user's own reservation
+      allow update, delete: if isAdmin() || 
+                            (isAuthenticated() && resource.data.user_id == request.auth.uid) ||
+                            (request.resource.data.user_id == resource.data.user_id); 
+    }
+  }
+}

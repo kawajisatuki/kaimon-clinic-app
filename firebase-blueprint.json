@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "username": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "admin"] }
+      },
+      "required": ["id", "username", "name", "role"]
+    },
+    "MenuItem": {
+      "title": "MenuItem",
+      "description": "A single menu item for a specific date and meal type",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "meal_type": { "type": "string", "enum": ["lunch", "dinner"] },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "calories": { "type": "number" },
+        "allergens": { "type": "string" }
+      },
+      "required": ["id", "date", "meal_type", "title"]
+    },
+    "Reservation": {
+      "title": "Reservation",
+      "description": "A reservation made by a user for a specific menu item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "menu_id": { "type": "string" },
+        "status": { "type": "string" },
+        "consumed": { "type": "boolean" },
+        "guest_name": { "type": "string" }
+      },
+      "required": ["id", "menu_id", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/menu/{menuId}": {
+      "schema": "MenuItem",
+      "description": "Menu items"
+    },
+    "/reservations/{reservationId}": {
+      "schema": "Reservation",
+      "description": "User and guest reservations"
+    }
+  }
+}
