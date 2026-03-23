@@ -616,9 +616,17 @@ function AppContent() {
 
   const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
     try {
+      // 1. データベース（Firestore）を更新
       await updateDoc(doc(db, 'reservations', reservationId), {
         consumed: !currentStatus
       });
+
+      // 2. ★ここを追加：画面の状態（State）を即座に更新する
+      setReservations(prev => prev.map(res => 
+        res.id === reservationId ? { ...res, consumed: !currentStatus } : res
+      ));
+
+      // 成功時のメッセージ表示
       if (!currentStatus) {
         showToast('喫食を確認しました。召し上がれ！');
       }
