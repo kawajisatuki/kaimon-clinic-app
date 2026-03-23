@@ -581,8 +581,7 @@ function AppContent() {
         });
       setDailyChecklist(checklist);
     }
-  }, [isAdminView, menu, reservations, adminUsers, checklistDate]);
-
+ }, [isAdminView, menu, reservations, adminUsers, checklistDate, selfCheckSearch, selfCheckMealFilter]);
   const handleGuestReservation = async (menuId: string) => {
     if (!guestName.trim()) {
       showToast('お名前を入力してください', 'error');
@@ -621,14 +620,7 @@ function AppContent() {
         consumed: !currentStatus
       });
 
-      // 2. ★【重要】表示に使っている dailyChecklist の中身を即座に書き換える
-      setDailyChecklist(prev => 
-        prev.map(item => 
-          item.id === reservationId ? { ...item, consumed: !currentStatus } : item
-        )
-      );
-
-      // 3. 大元のデータも更新しておく
+      // 2. 画面のデータを即座に更新（setReservationsは1回でOKです）
       setReservations(prev => 
         prev.map(res => 
           res.id === reservationId ? { ...res, consumed: !currentStatus } : res
