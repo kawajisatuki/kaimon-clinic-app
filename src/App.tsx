@@ -613,20 +613,22 @@ function AppContent() {
     }
   };
 
-  const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
+ const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
     try {
-      // 1. データベース(Firestore)を更新
+      // 1. データベース（Firestore）を更新
       await updateDoc(doc(db, 'reservations', reservationId), {
         consumed: !currentStatus
       });
 
-      // 2. 画面のデータを即座に更新（setReservationsは1回でOKです）
+      // 2. 画面のデータ（reservations）を即座に更新
+      // これにより、リロードなしでチェックが反映されます
       setReservations(prev => 
         prev.map(res => 
           res.id === reservationId ? { ...res, consumed: !currentStatus } : res
         )
       );
 
+      // 3. 成功メッセージの表示
       if (!currentStatus) {
         showToast('喫食を確認しました。');
       }
@@ -634,7 +636,6 @@ function AppContent() {
       handleFirestoreError(error, OperationType.UPDATE, `reservations/${reservationId}`, showToast);
     }
   };
-
       // 成功時のメッセージ表示
       if (!currentStatus) {
         showToast('喫食を確認しました。召し上がれ！');
