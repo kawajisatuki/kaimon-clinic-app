@@ -620,7 +620,15 @@ function AppContent() {
         consumed: !currentStatus
       });
 
-      // 2. 画面の状態を即座に更新（これを1回だけ書くのが正解です）
+      // 2. 画面のデータ（dailyChecklist）を即座に更新
+      // これを足すことで、集計レポートと同じようにリアルタイムに色が変わります
+      setDailyChecklist(prev => 
+        prev.map(item => 
+          item.id === reservationId ? { ...item, consumed: !currentStatus } : item
+        )
+      );
+
+      // 3. 予備：念のため大元のデータも更新
       setReservations(prev => 
         prev.map(res => 
           res.id === reservationId ? { ...res, consumed: !currentStatus } : res
@@ -1111,40 +1119,43 @@ function AppContent() {
                   </div>
                 </div>
 
-                <div className="space-y-0 border border-stone-200 rounded-3xl overflow-hidden bg-white shadow-sm max-h-[400px] overflow-y-auto custom-scrollbar">
-                  {Array.isArray(dailyChecklist) && dailyChecklist
-                    .filter(row => {
-                      if (!row) return false;
-                      const matchesSearch = row.name.toLowerCase().includes(selfCheckSearch.toLowerCase());
-                      const matchesMeal = selfCheckMealFilter === 'all' || row.meal_type === selfCheckMealFilter;
-                      return matchesSearch && matchesMeal;
-                    })
-                    .map((row, idx, arr) => (
-                      <div 
-                        key={row.id} 
-                        onClick={() => toggleConsumed(row.id, row.consumed)}
-                        className={`p-5 transition-all cursor-pointer flex items-center justify-between group ${idx !== arr.length - 1 ? 'border-b border-stone-100' : ''} ${row.consumed ? 'bg-emerald-50/30' : 'hover:bg-stone-50'}`}
-                      >
-                        <div className="flex items-center gap-5">
-                          <div className={`w-10 h-10 rounded-2xl border-2 flex items-center justify-center transition-all ${row.consumed ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-stone-300 bg-white group-hover:border-emerald-400'}`}>
-                            {row.consumed ? <Check size={24} strokeWidth={3} /> : <div className="w-2 h-2 bg-stone-200 rounded-full" />}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <p className={`text-lg font-bold transition-all ${row.consumed ? 'text-stone-400 line-through' : 'text-stone-800'}`}>{row.name}</p>
-                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${row.meal_type === 'dinner' ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                                {row.meal_type === 'dinner' ? '夕食' : '昼食'}
-                              </span>
-                            </div>
-                            <p className="text-xs font-bold text-stone-400 uppercase tracking-tight">{row.username === 'GUEST' ? 'ゲスト' : `ID: ${row.username}`}</p>
-                          </div>
-                        </div>
-                        {row.consumed ? (
-                          <span className="text-xs font-bold text-emerald-600 bg-emerald-100 px-3 py-1.5 rounded-xl">喫食済み</span>
-                        ) : (
-                          <span className="text-xs font-bold text-stone-300 opacity-0 group-hover:opacity-100 transition-opacity">タップしてチェック</span>
-                        )}
-                      </div>
+               {/* 修正後のセルフチェック表示部分 */}
+<div className="space-y-0 border border-stone-200 rounded-3xl overflow-hidden bg-white shadow-sm max-h-[400px] overflow-y-auto custom-scrollbar">
+  {Array.isArray(dailyChecklist) && dailyChecklist
+    .filter(row => {
+      if (!row) return false;
+      const matchesSearch = row.name.toLowerCase().includes(selfCheckSearch.toLowerCase());
+      const matchesMeal = selfCheckMealFilter === 'all' || row.meal_type === selfCheckMealFilter;
+      return matchesSearch && matchesMeal;
+    })
+    .map((row, idx, arr) => (
+      <div 
+        key={row.id} 
+        onClick={() => toggleConsumed(row.id, row.consumed)}
+        className={`p-5 transition-all cursor-pointer flex items-center justify-between group ${idx !== arr.length - 1 ? 'border-b border-stone-100' : ''} ${row.consumed ? 'bg-emerald-50/30' : 'hover:bg-stone-50'}`}
+      >
+        <div className="flex items-center gap-5">
+          <div className={`w-10 h-10 rounded-2xl border-2 flex items-center justify-center transition-all ${row.consumed ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-stone-300 bg-white group-hover:border-emerald-400'}`}>
+            {row.consumed ? <Check size={24} strokeWidth={3} /> : <div className="w-2 h-2 bg-stone-200 rounded-full" />}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <p className={`text-lg font-bold transition-all ${row.consumed ? 'text-stone-400 line-through' : 'text-stone-800'}`}>{row.name}</p>
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${row.meal_type === 'dinner' ? 'bg-indigo-100 text-indigo-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                {row.meal_type === 'dinner' ? '夕食' : '昼食'}
+              </span>
+            </div>
+            <p className="text-xs font-bold text-stone-400 uppercase tracking-tight">{row.username === 'GUEST' ? 'ゲスト' : `ID: ${row.username}`}</p>
+          </div>
+        </div>
+        {row.consumed ? (
+          <span className="text-xs font-bold text-emerald-600 bg-emerald-100 px-3 py-1.5 rounded-xl">喫食済み</span>
+        ) : (
+          <span className="text-xs font-bold text-stone-300 opacity-0 group-hover:opacity-100 transition-opacity">タップしてチェック</span>
+        )}
+      </div>
+    ))}
+</div>
                     ))}
                   {dailyChecklist.length === 0 && (
                     <div className="text-center py-16 text-stone-400">
