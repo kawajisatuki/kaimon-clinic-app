@@ -38,14 +38,7 @@ enum OperationType {
 
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null, toastFn?: (msg: string, type?: 'success' | 'error') => void) {
   const errorMsg = error instanceof Error ? error.message : String(error);
-  console.error(`Firestore Error (${operationType}):`, errorMsg);
-  if (toastFn) {
-    if (errorMsg.includes('permission-denied')) {
-      toastFn("権限がありません。ログイン状態を確認してください。", "error");
-    } else {
-      toastFn(`エラーが発生しました: ${errorMsg.substring(0, 50)}`, "error");
-    }
-  }
+  if (toastFn) toastFn(`エラーが発生しました: ${errorMsg.substring(0, 50)}`, "error");
 }
 
 const formatDate = (date: Date) => {
@@ -55,7 +48,6 @@ const formatDate = (date: Date) => {
   return `${y}-${m}-${d}`;
 };
 
-// --- Main Component ---
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAdminView, setIsAdminView] = useState(false);
@@ -64,14 +56,13 @@ export default function App() {
   const [reservations, setReservations] = useState<Reservation[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(formatDate(new Date()));
   const [selectedMealType, setSelectedMealType] = useState<'lunch' | 'dinner'>('lunch');
-  const [advice, setAdvice] = useState<string>("");
-  const [loadingAdvice, setLoadingAdvice] = useState(false);
   const [isSelfCheckMode, setIsSelfCheckMode] = useState(false);
   const [selfCheckSearch, setSelfCheckSearch] = useState('');
   const [selfCheckMealFilter, setSelfCheckMealFilter] = useState<'all' | 'lunch' | 'dinner'>('all');
   const [dailyChecklist, setDailyChecklist] = useState<any[]>([]);
   const [checklistDate, setChecklistDate] = useState(formatDate(new Date()));
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
+  const [adminTab, setAdminTab] = useState<'menu' | 'students' | 'report'>('menu');
   const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
@@ -79,7 +70,7 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // Auth Listener
+  // Auth
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
@@ -101,74 +92,46 @@ export default function App() {
   // Data Sync
   useEffect(() => {
     if (!isAuthReady) return;
-    const qMenu = query(collection(db, 'menu'), orderBy('date', 'asc'));
-    const unsubscribeMenu = onSnapshot(qMenu, (snap) => {
+    const unsubMenu = onSnapshot(query(collection(db, 'menu'), orderBy('date', 'asc')), (snap) => {
       setMenu(snap.docs.map(d => d.data() as MenuItem));
     });
-
-    const qRes = query(collection(db, 'reservations'));
-    const unsubscribeRes = onSnapshot(qRes, (snap) => {
+    const unsubRes = onSnapshot(collection(db, 'reservations'), (snap) => {
       setReservations(snap.docs.map(d => d.data() as Reservation));
     });
-
-    const unsubscribeUsers = onSnapshot(collection(db, 'users'), (snap) => {
+    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
       setAdminUsers(snap.docs.map(d => d.data() as User));
     });
-
-    return () => {
-      unsubscribeMenu();
-      unsubscribeRes();
-      unsubscribeUsers();
-    };
+    return () => { unsubMenu(); unsubRes(); unsubUsers(); };
   }, [isAuthReady]);
 
-  // ★【流用のキモ】集計リストの作成（reservationsが変わると自動更新される）
+  // Checklist Logic
   useEffect(() => {
-    const dayMenus = menu.filter(m => m.date === checklistDate);
-    const dayMenuIds = dayMenus.map(m => m.id);
-    
+    const dayMenuIds = menu.filter(m => m.date === checklistDate).map(m => m.id);
     const checklist = reservations
       .filter(r => dayMenuIds.includes(r.menu_id))
-      .map(r => {
-        const u = adminUsers.find(user => user.id === r.user_id);
-        const m = menu.find(item => item.id === r.menu_id);
-        return {
-          id: r.id,
-          name: u ? u.name : `ゲスト: ${r.guest_name}`,
-          username: u ? u.username : 'GUEST',
-          consumed: r.consumed,
-          meal_type: m?.meal_type || 'lunch'
-        };
-      });
+      .map(r => ({
+        id: r.id,
+        name: adminUsers.find(u => u.id === r.user_id)?.name || `ゲスト: ${r.guest_name}`,
+        username: adminUsers.find(u => u.id === r.user_id)?.username || 'GUEST',
+        consumed: r.consumed,
+        meal_type: menu.find(m => m.id === r.menu_id)?.meal_type || 'lunch'
+      }));
     setDailyChecklist(checklist);
   }, [menu, reservations, adminUsers, checklistDate]);
 
-  // ★【流用のキモ】チェックボタンの処理
   const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
     try {
-      await updateDoc(doc(db, 'reservations', reservationId), {
-        consumed: !currentStatus
-      });
-      // ステートを直接更新して即時反映させる
-      setReservations(prev => prev.map(res => 
-        res.id === reservationId ? { ...res, consumed: !currentStatus } : res
-      ));
+      await updateDoc(doc(db, 'reservations', reservationId), { consumed: !currentStatus });
       if (!currentStatus) showToast('喫食を確認しました。');
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `reservations/${reservationId}`, showToast);
     }
   };
 
-  const handleGoogleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
-  };
-
-  if (!isAuthReady) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (!isAuthReady) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin text-emerald-600" /></div>;
 
   return (
-    <div className="min-h-screen bg-stone-50 font-sans text-stone-900 pb-20">
-      {/* Toast Notification */}
+    <div className="min-h-screen bg-stone-50 text-stone-900 pb-20">
       <AnimatePresence>
         {toast && (
           <motion.div initial={{ y: -20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -20, opacity: 0 }}
@@ -179,78 +142,84 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Main UI */}
+      {/* 表示切り替え */}
       {!user && !isSelfCheckMode ? (
         <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-emerald-700">
-          <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-sm text-center">
-            <div className="w-20 h-20 bg-emerald-100 rounded-3xl flex items-center justify-center mx-auto mb-6">
-              <UtensilsCrossed size={40} className="text-emerald-600" />
-            </div>
-            <h1 className="text-2xl font-black text-stone-800 mb-2 tracking-tight">かいもんクリニック</h1>
-            <p className="text-stone-500 mb-8 font-medium">職員食堂予約システム</p>
-            <button onClick={handleGoogleLogin} className="w-full py-4 bg-stone-900 text-white rounded-2xl font-bold mb-4 flex items-center justify-center gap-2">
-              Googleでログイン
-            </button>
-            <button onClick={() => setIsSelfCheckMode(true)} className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-200">
-              みんなのごはん（喫食チェック）
-            </button>
+           <div className="bg-white p-8 rounded-[40px] shadow-2xl w-full max-w-sm text-center">
+            <h1 className="text-2xl font-black text-stone-800 mb-8">職員食堂システム</h1>
+            <button onClick={() => signInWithPopup(auth, new GoogleAuthProvider())} className="w-full py-4 bg-stone-900 text-white rounded-2xl font-bold mb-4">ログイン</button>
+            <button onClick={() => setIsSelfCheckMode(true)} className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold">みんなのごはん</button>
           </div>
         </div>
       ) : isSelfCheckMode ? (
         <div className="max-w-2xl mx-auto p-6 pt-12">
           <div className="flex items-center justify-between mb-8">
-            <h2 className="text-3xl font-black text-stone-800 tracking-tight">喫食チェック</h2>
-            <button onClick={() => setIsSelfCheckMode(false)} className="p-2 hover:bg-stone-200 rounded-full transition-all"><XCircle size={32} /></button>
+            <h2 className="text-3xl font-black text-stone-800">喫食チェック</h2>
+            <button onClick={() => setIsSelfCheckMode(false)} className="p-2"><XCircle size={32} /></button>
           </div>
-          
-          <div className="bg-white p-6 rounded-[32px] shadow-sm border border-stone-100 mb-6">
-            <div className="relative mb-4">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-stone-400" size={20} />
-              <input type="text" placeholder="名前やIDで検索..." value={selfCheckSearch} onChange={(e) => setSelfCheckSearch(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 bg-stone-50 border-none rounded-2xl focus:ring-2 focus:ring-emerald-500 font-medium" />
-            </div>
-            <div className="flex gap-2">
-              {(['all', 'lunch', 'dinner'] as const).map(type => (
-                <button key={type} onClick={() => setSelfCheckMealFilter(type)}
-                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all ${selfCheckMealFilter === type ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-500'}`}>
-                  {type === 'all' ? 'すべて' : type === 'lunch' ? '昼食' : '夕食'}
-                </button>
-              ))}
-            </div>
+          <div className="bg-white p-6 rounded-[32px] shadow-sm mb-6">
+            <input type="text" placeholder="検索..." value={selfCheckSearch} onChange={(e) => setSelfCheckSearch(e.target.value)}
+              className="w-full p-4 bg-stone-50 rounded-2xl mb-4" />
           </div>
-
           <div className="space-y-3">
-            {dailyChecklist
-              .filter(row => {
-                const matchesSearch = row.name.toLowerCase().includes(selfCheckSearch.toLowerCase()) || row.username.toLowerCase().includes(selfCheckSearch.toLowerCase());
-                const matchesMeal = selfCheckMealFilter === 'all' || row.meal_type === selfCheckMealFilter;
-                return matchesSearch && matchesMeal;
-              })
-              .map(row => (
-                <button key={row.id} onClick={() => toggleConsumed(row.id, row.consumed)}
-                  className={`w-full p-5 rounded-3xl flex items-center justify-between transition-all border-2 ${row.consumed ? 'bg-emerald-50 border-emerald-500' : 'bg-white border-stone-100 shadow-sm'}`}>
-                  <div className="flex items-center gap-4 text-left">
-                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${row.consumed ? 'bg-emerald-500 text-white' : 'bg-stone-100 text-stone-400'}`}>
-                      {row.consumed ? <Check size={28} strokeWidth={3} /> : <div className="w-2 h-2 bg-stone-300 rounded-full" />}
-                    </div>
-                    <div>
-                      <p className={`text-xl font-bold ${row.consumed ? 'text-emerald-900' : 'text-stone-800'}`}>{row.name}</p>
-                      <p className="text-xs font-bold text-stone-400">ID: {row.username}</p>
-                    </div>
+            {dailyChecklist.filter(row => row.name.includes(selfCheckSearch)).map(row => (
+              <button key={row.id} onClick={() => toggleConsumed(row.id, row.consumed)}
+                className={`w-full p-5 rounded-3xl flex items-center justify-between border-2 transition-all ${row.consumed ? 'bg-emerald-50 border-emerald-500' : 'bg-white border-stone-100 shadow-sm'}`}>
+                <div className="flex items-center gap-4">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${row.consumed ? 'bg-emerald-500 text-white' : 'bg-stone-100'}`}>
+                    {row.consumed ? <Check size={28} /> : null}
                   </div>
-                  <span className={`px-3 py-1 rounded-lg text-xs font-black uppercase ${row.meal_type === 'lunch' ? 'bg-orange-100 text-orange-600' : 'bg-indigo-100 text-indigo-600'}`}>
-                    {row.meal_type === 'lunch' ? '昼食' : '夕食'}
-                  </span>
-                </button>
-              ))}
+                  <div className="text-left">
+                    <p className="font-bold text-lg">{row.name}</p>
+                    <p className="text-xs text-stone-400">ID: {row.username}</p>
+                  </div>
+                </div>
+                <span className="text-xs font-black px-2 py-1 bg-stone-100 rounded">{row.meal_type === 'lunch' ? '昼食' : '夕食'}</span>
+              </button>
+            ))}
           </div>
         </div>
       ) : (
-        /* 通常の予約画面（ログイン後）は、長くなるため簡略化していますが、
-           isAdminViewなどの条件で既存のUIを表示するように構成してください */
-        <div className="p-6 text-center">
-          <h1 className="text-xl font-bold">ログイン中: {user?.name}</h1>
-          <button onClick={() => signOut(auth)} className="mt-4 px-6 py-2 bg-stone-200 rounded-xl">ログアウト</button>
+        <div className="max-w-6xl mx-auto p-6">
+          {/* 管理画面ナビゲーション */}
+          {isAdminView && (
+            <div className="flex gap-4 mb-8 bg-white p-2 rounded-3xl shadow-sm w-fit">
+              <button onClick={() => setAdminTab('menu')} className={`px-6 py-3 rounded-2xl font-bold ${adminTab === 'menu' ? 'bg-stone-900 text-white' : ''}`}>献立管理</button>
+              <button onClick={() => setAdminTab('students')} className={`px-6 py-3 rounded-2xl font-bold ${adminTab === 'students' ? 'bg-stone-900 text-white' : ''}`}>職員管理</button>
+              <button onClick={() => setAdminTab('report')} className={`px-6 py-3 rounded-2xl font-bold ${adminTab === 'report' ? 'bg-emerald-600 text-white' : ''}`}>集計レポート</button>
+            </div>
+          )}
+
+          {/* 集計レポート画面の再現 */}
+          {isAdminView && adminTab === 'report' ? (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-stone-100">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-2xl font-black">日別チェック表</h3>
+                  <input type="date" value={checklistDate} onChange={(e) => setChecklistDate(e.target.value)} className="p-2 border rounded-xl" />
+                </div>
+                <div className="space-y-4">
+                  {dailyChecklist.map(row => (
+                    <div key={row.id} className={`p-4 rounded-3xl border flex items-center justify-between ${row.consumed ? 'bg-emerald-50 border-emerald-200' : 'bg-stone-50 border-stone-100'}`}>
+                      <div className="flex items-center gap-3">
+                        <div onClick={() => toggleConsumed(row.id, row.consumed)} className="cursor-pointer">
+                          {row.consumed ? <CheckCircle2 className="text-emerald-600" /> : <div className="w-6 h-6 border-2 rounded-full border-stone-300" />}
+                        </div>
+                        <span className="font-bold">{row.name}</span>
+                        <span className="text-xs px-2 py-1 bg-white rounded shadow-sm">{row.meal_type === 'lunch' ? '昼食' : '夕食'}</span>
+                      </div>
+                      <span className="text-sm font-bold text-stone-400">{row.consumed ? '食事済' : '未完了'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-20">
+              <h2 className="text-2xl font-bold mb-4">こんにちは、{user?.name}さん</h2>
+              <button onClick={() => signOut(auth)} className="px-8 py-3 bg-stone-200 rounded-2xl font-bold">ログアウト</button>
+            </div>
+          )}
         </div>
       )}
     </div>
