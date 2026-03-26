@@ -613,12 +613,11 @@ function AppContent() {
       setIsReservingGuest(false);
     }
   };
-
- // --- 喫食チェック更新関数 (修正版) ---
+// --- 喫食チェック更新関数 (修正版) ---
   const toggleConsumed = async (resId: string, currentStatus: boolean) => {
     if (!resId) return;
     try {
-      // 1. Firestoreのデータを更新
+      // 1. Firebaseのデータを更新
       await updateDoc(doc(db, 'reservations', resId), { 
         consumed: !currentStatus 
       });
@@ -629,14 +628,12 @@ function AppContent() {
       } else {
         showToast('喫食チェックを取り消しました');
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("更新エラー:", error);
       handleFirestoreError(error, OperationType.UPDATE, `reservations/${resId}`, showToast);
     }
   };
 
-  // --- 職員登録関数 ---
-  const handleAddUser = async (e: FormEvent) => {
 
   const handleAddUser = async (e: FormEvent) => {
     // ...（以下、既存のhandleAddUserへ続く）
