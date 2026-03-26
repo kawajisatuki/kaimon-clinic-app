@@ -614,12 +614,14 @@ function AppContent() {
     }
   };
 
-  const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
-    try {
-      // 1. データベース（Firestore）を更新
-      await updateDoc(doc(db, 'reservations', reservationId), {
-        consumed: !currentStatus
-      });
+ const toggleConsumed = async (resId: string, currentStatus: boolean) => {
+  try {
+    await updateDoc(doc(db, 'reservations', resId), { consumed: !currentStatus });
+    // トースト通知はお好みで（例: showToast('更新しました')）
+  } catch (e) {
+    console.error("更新エラー:", e);
+  }
+};
 
       // 2. ★ここを追加：画面の状態（State）を即座に更新する
       setReservations(prev => prev.map(res => 
