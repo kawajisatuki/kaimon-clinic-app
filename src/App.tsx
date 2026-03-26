@@ -618,12 +618,12 @@ function AppContent() {
   const toggleConsumed = async (resId: string, currentStatus: boolean) => {
     if (!resId) return;
     try {
-      // Firestoreのデータを更新
+      // 1. Firestoreのデータを更新
       await updateDoc(doc(db, 'reservations', resId), { 
         consumed: !currentStatus 
       });
       
-      // 成功時のメッセージ表示
+      // 2. 成功時のメッセージ表示
       if (!currentStatus) {
         showToast('喫食を確認しました。召し上がれ！');
       } else {
@@ -634,6 +634,9 @@ function AppContent() {
       handleFirestoreError(error, OperationType.UPDATE, `reservations/${resId}`, showToast);
     }
   };
+
+  // --- 職員登録関数 ---
+  const handleAddUser = async (e: FormEvent) => {
 
   const handleAddUser = async (e: FormEvent) => {
     // ...（以下、既存のhandleAddUserへ続く）
