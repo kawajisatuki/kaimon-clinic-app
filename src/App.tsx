@@ -614,14 +614,29 @@ function AppContent() {
     }
   };
 
- const toggleConsumed = async (resId: string, currentStatus: boolean) => {
-  try {
-    await updateDoc(doc(db, 'reservations', resId), { consumed: !currentStatus });
-    // トースト通知はお好みで（例: showToast('更新しました')）
-  } catch (e) {
-    console.error("更新エラー:", e);
-  }
-};
+ // --- 喫食チェック更新関数 (修正版) ---
+  const toggleConsumed = async (resId: string, currentStatus: boolean) => {
+    if (!resId) return;
+    try {
+      // Firestoreのデータを更新
+      await updateDoc(doc(db, 'reservations', resId), { 
+        consumed: !currentStatus 
+      });
+      
+      // 成功時のメッセージ表示
+      if (!currentStatus) {
+        showToast('喫食を確認しました。召し上がれ！');
+      } else {
+        showToast('喫食チェックを取り消しました');
+      }
+    } catch (error) {
+      console.error("更新エラー:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `reservations/${resId}`, showToast);
+    }
+  };
+
+  const handleAddUser = async (e: FormEvent) => {
+    // ...（以下、既存のhandleAddUserへ続く）
 
       // 2. ★ここを追加：画面の状態（State）を即座に更新する
       setReservations(prev => prev.map(res => 
