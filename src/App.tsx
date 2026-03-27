@@ -1,28 +1,34 @@
-import React, { useState, useEffect, useRef, ReactNode, ChangeEvent } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Calendar, ClipboardList, UtensilsCrossed, LogOut, 
-  Settings, CheckCircle2, Check, Info, Loader2, Upload, 
-  FileDown, Trash2, Sparkles, User as UserIcon, AlertCircle,
-  ChevronLeft, ChevronRight, Search, Plus, Save, FileText
+  Settings, CheckCircle2, Check, Trash2, User as UserIcon,
+  ChevronRight, AlertCircle, Info, Loader2, Plus, FileDown, 
+  Search, ShieldCheck, Clock, UserPlus, Filter, Download,
+  MoreVertical, Edit3, Save, X, ChevronLeft, CalendarDays,
+  Users, BarChart3, Database, HardDrive, RefreshCcw
 } from 'lucide-react';
 import { 
   collection, doc, getDoc, setDoc, updateDoc, deleteDoc, 
-  onSnapshot, query, where, orderBy, writeBatch, Timestamp, 
-  limit, getDocs 
+  onSnapshot, query, where, orderBy, Timestamp, getDocs, 
+  writeBatch, limit, startAfter, serverTimestamp 
 } from 'firebase/firestore';
-import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut } from 'firebase/auth';
+import { 
+  signInWithPopup, GoogleAuthProvider, onAuthStateChanged, 
+  signOut, setPersistence, browserLocalPersistence 
+} from 'firebase/auth';
 import { db, auth } from './firebase';
 
 // ==========================================
-// 1. 型定義 (原型のデータ構造を厳守)
+// 1. 高度な型定義 (Core Domain Schema)
 // ==========================================
-interface User {
+interface UserProfile {
   id: string;
-  username?: string;
   name: string;
   role: 'admin' | 'student';
-  createdAt?: any;
+  email: string;
+  lastLogin?: any;
+  department?: string;
 }
 
 interface MenuItem {
@@ -31,8 +37,8 @@ interface MenuItem {
   title: string;
   meal_type: 'lunch' | 'dinner';
   description?: string;
-  calories?: number;
-  createdAt?: any;
+  calories?: string;
+  createdBy?: string;
 }
 
 interface Reservation {
@@ -44,76 +50,83 @@ interface Reservation {
   date: string;
   meal_type: 'lunch' | 'dinner';
   consumed: boolean;
-  status: 'reserved' | 'cancelled';
-  createdAt?: any;
+  timestamp: any;
 }
 
 // ==========================================
-// 2. ユーティリティ & エラーハンドリング
+// 2. ユーティリティ (Business Logic Helpers)
 // ==========================================
-const formatDate = (date: Date) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+const getTodayStr = () => new Date().toISOString().split('T')[0];
+
+const MEAL_TYPES = {
+  LUNCH: 'lunch' as const,
+  DINNER: 'dinner' as const
 };
 
 // ==========================================
-// 3. メインコンポーネント
+// 3. メインアプリケーションコンポーネント
 // ==========================================
 export default function App() {
   // --- 認証系ステート ---
-  const [user, setUser] = useState<User | null>(null);
-  const [isAdminView, setIsAdminView] = useState(false);
+  const [user, setUser] = useState<UserProfile | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isAdminMode, setIsAdminMode] = useState(false);
 
   // --- データ系ステート ---
-  const [menu, setMenu] = useState<MenuItem[]>([]);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [reservations, setReservations] = useState<Reservation[]>([]);
-  const [adminUsers, setAdminUsers] = useState<User[]>([]);
+  const [staffList, setStaffList] = useState<UserProfile[]>([]);
+  
+  // --- UI・操作系ステート ---
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr());
+  const [activeMealType, setActiveMealType] = useState<'lunch' | 'dinner'>(MEAL_TYPES.LUNCH);
+  const [adminActiveTab, setAdminActiveTab] = useState<'menu' | 'analytics' | 'staff'>('menu');
+  const [isLoading, setIsLoading] = useState(false);
+  const [globalToast, setGlobalToast] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
-  // --- UI制御系ステート ---
-  const [selectedDate, setSelectedDate] = useState<string>(formatDate(new Date()));
-  const [selectedMealType, setSelectedMealType] = useState<'lunch' | 'dinner'>('lunch');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [adminTab, setAdminTab] = useState<'menu' | 'report' | 'users' | 'settings'>('menu');
-  const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
-
-  // --- トースト機能 ---
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+  // --- 管理者用編集ステート ---
+  const [newMenuTitle, setNewMenuTitle] = useState('');
+  const [isAddingMenu, setIsAddingMenu] = useState(false);
 
   // ==========================================
-  // 4. Firebase 認証ロジック
+  // 4. Firebase Authentication ロジック
   // ==========================================
   useEffect(() => {
+    // 永続性の設定
+    setPersistence(auth, browserLocalPersistence);
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (fbUser) {
         try {
-          const userDocRef = doc(db, 'users', fbUser.uid);
-          const uDoc = await getDoc(userDocRef);
+          const userRef = doc(db, 'users', fbUser.uid);
+          const userSnap = await getDoc(userRef);
           
-          if (uDoc.exists()) {
-            setUser(uDoc.data() as User);
+          if (userSnap.exists()) {
+            const userData = userSnap.data() as UserProfile;
+            setUser(userData);
+            // ログイン時刻の更新
+            await updateDoc(userRef, { lastLogin: serverTimestamp() });
           } else {
-            // 新規ユーザー登録 (管理者のメールアドレスは固定)
-            const newUser: User = {
+            // 初回ログイン時の自動登録 (管理者メールアドレス判定)
+            const isFirstAdmin = fbUser.email === 'satukikawaji@gmail.com';
+            const newUser: UserProfile = {
               id: fbUser.uid,
-              name: fbUser.displayName || '職員',
-              role: fbUser.email === 'satukikawaji@gmail.com' ? 'admin' : 'student',
-              createdAt: Timestamp.now()
+              name: fbUser.displayName || '未設定職員',
+              role: isFirstAdmin ? 'admin' : 'student',
+              email: fbUser.email || '',
+              department: '一般'
             };
-            await setDoc(userDocRef, newUser);
+            await setDoc(userRef, { ...newUser, lastLogin: serverTimestamp() });
             setUser(newUser);
           }
         } catch (error) {
-          console.error("User init error:", error);
-          showToast("ユーザー情報の取得に失敗しました", "error");
+          console.error("Auth Error:", error);
+          triggerToast("ログイン処理中にエラーが発生しました", "error");
         }
       } else {
         setUser(null);
+        setIsAdminMode(false);
       }
       setIsAuthReady(true);
     });
@@ -121,277 +134,322 @@ export default function App() {
   }, []);
 
   // ==========================================
-  // 5. リアルタイム同期ロジック (核心)
+  // 5. リアルタイム・データ同期 (Real-time Sync)
   // ==========================================
   useEffect(() => {
-    if (!isAuthReady) return;
+    if (!isAuthReady || !user) return;
 
-    // A. 献立データのリアルタイム同期
-    const menuQuery = query(collection(db, 'menu'), orderBy('date', 'asc'));
-    const unsubMenu = onSnapshot(menuQuery, (snap) => {
-      const menuData = snap.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
-      setMenu(menuData);
-    }, (error) => {
-      console.error("Menu sync error:", error);
+    // A. 献立データの同期 (前後1ヶ月分を対象)
+    const menuQuery = query(
+      collection(db, 'menu'),
+      orderBy('date', 'desc'),
+      limit(100)
+    );
+    const unsubMenu = onSnapshot(menuQuery, (snapshot) => {
+      const items = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as MenuItem));
+      setMenuItems(items);
     });
 
-    // B. 予約データのリアルタイム同期 (予約最優先の設計)
-    // 管理者は全件、一般ユーザーは自分の予約のみ
-    const resCollection = collection(db, 'reservations');
-    const resQuery = user?.role === 'admin' 
-      ? query(resCollection, orderBy('date', 'desc'))
-      : query(resCollection, where('user_id', '==', user?.id || ''));
+    // B. 予約データの同期 (管理者は全件、一般は自分のみ)
+    const resBaseQuery = collection(db, 'reservations');
+    const resQuery = user.role === 'admin' 
+      ? query(resBaseQuery, orderBy('date', 'desc'), limit(500))
+      : query(resBaseQuery, where('user_id', '==', user.id));
 
-    const unsubRes = onSnapshot(resQuery, (snap) => {
-      const resData = snap.docs.map(d => ({ ...d.data(), id: d.id } as Reservation));
+    const unsubRes = onSnapshot(resQuery, (snapshot) => {
+      const resData = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as Reservation));
       setReservations(resData);
-    }, (error) => {
-      console.error("Reservation sync error:", error);
     });
 
-    // C. 管理者用ユーザーリストの同期
-    let unsubUsers = () => {};
-    if (user?.role === 'admin') {
-      unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
-        setAdminUsers(snap.docs.map(d => d.data() as User));
+    // C. 職員名簿の同期 (管理者のみ)
+    let unsubStaff = () => {};
+    if (user.role === 'admin') {
+      unsubStaff = onSnapshot(collection(db, 'users'), (snapshot) => {
+        setStaffList(snapshot.docs.map(d => d.data() as UserProfile));
       });
     }
 
     return () => {
       unsubMenu();
       unsubRes();
-      unsubUsers();
+      unsubStaff();
     };
   }, [isAuthReady, user]);
 
   // ==========================================
-  // 6. 業務アクション (予約・喫食・管理者操作)
+  // 6. 業務アクション (Core Actions)
   // ==========================================
 
-  // 予約のトグル (最優先アクション)
-  const handleToggleReservation = async (menuItem: MenuItem) => {
-    if (!user) return;
-    const resId = `${user.id}_${menuItem.id}`;
-    const exists = reservations.find(r => r.id === resId);
+  const triggerToast = (msg: string, type: 'success' | 'error' = 'success') => {
+    setGlobalToast({ msg, type });
+    setTimeout(() => setGlobalToast(null), 4000);
+  };
 
+  // 予約実行・取消ロジック
+  const toggleReservation = async (targetMenu: MenuItem) => {
+    if (!user) return;
+    const reservationId = `${user.id}_${targetMenu.id}`;
+    const isReserved = reservations.some(r => r.id === reservationId);
+
+    setIsLoading(true);
     try {
-      if (exists) {
-        // 予約取り消し (ピンクボタンの挙動)
-        await deleteDoc(doc(db, 'reservations', resId));
-        showToast("予約を取り消しました");
+      if (isReserved) {
+        await deleteDoc(doc(db, 'reservations', reservationId));
+        triggerToast("予約を取り消しました");
       } else {
-        // 予約作成 (グリーンボタンの挙動)
-        const newRes: Reservation = {
-          id: resId,
+        const newDoc: Reservation = {
+          id: reservationId,
           user_id: user.id,
           user_name: user.name,
-          menu_id: menuItem.id!,
-          title: menuItem.title,
-          date: menuItem.date,
-          meal_type: menuItem.meal_type,
+          menu_id: targetMenu.id!,
+          title: targetMenu.title,
+          date: targetMenu.date,
+          meal_type: targetMenu.meal_type,
           consumed: false,
-          status: 'reserved',
-          createdAt: Timestamp.now()
+          timestamp: serverTimestamp()
         };
-        await setDoc(doc(db, 'reservations', resId), newRes);
-        showToast("予約を完了しました！");
+        await setDoc(doc(db, 'reservations', reservationId), newDoc);
+        triggerToast("予約が完了しました！");
       }
-    } catch (error) {
-      showToast("操作に失敗しました", "error");
+    } catch (err) {
+      triggerToast("通信に失敗しました。電波状況を確認してください", "error");
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // 喫食ステータスのトグル
-  const handleToggleConsumed = async (resId: string, currentState: boolean) => {
+  // 喫食確認ロジック
+  const toggleConsumedStatus = async (res: Reservation) => {
     try {
-      await updateDoc(doc(db, 'reservations', resId), {
-        consumed: !currentState
-      });
-      showToast(!currentState ? "喫食を確認しました" : "確認を取り消しました");
-    } catch (error) {
-      showToast("更新に失敗しました", "error");
+      const resRef = doc(db, 'reservations', res.id);
+      await updateDoc(resRef, { consumed: !res.consumed });
+    } catch (err) {
+      triggerToast("更新できませんでした", "error");
     }
   };
 
-  // CSVエクスポート
+  // 献立追加 (管理者)
+  const handleAddMenu = async () => {
+    if (!newMenuTitle) return;
+    try {
+      await setDoc(doc(collection(db, 'menu')), {
+        date: selectedDate,
+        title: newMenuTitle,
+        meal_type: activeMealType,
+        createdBy: user?.name
+      });
+      setNewMenuTitle('');
+      setIsAddingMenu(false);
+      triggerToast("献立を登録しました");
+    } catch (e) {
+      triggerToast("登録エラー", "error");
+    }
+  };
+
+  // CSVレポート生成
   const exportToCSV = () => {
-    const headers = "日付,氏名,区分,メニュー,喫食状況\n";
+    const BOM = "\uFEFF";
+    const header = "日付,区分,職員名,メニュー,喫食ステータス\n";
     const rows = reservations.map(r => 
-      `${r.date},${r.user_name},${r.meal_type === 'lunch' ? '昼食' : '夕食'},${r.title},${r.consumed ? '完了' : '未'}`
+      `${r.date},${r.meal_type === 'lunch' ? '昼食' : '夕食'},${r.user_name},${r.title},${r.consumed ? '完了' : '未'}`
     ).join("\n");
-    const blob = new Blob(["\uFEFF" + headers + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `予約状況_${formatDate(new Date())}.csv`;
+    
+    const blob = new Blob([BOM + header + rows], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `開聞クリニック_予約台帳_${getTodayStr()}.csv`;
     link.click();
   };
 
   // ==========================================
-  // 7. レンダリング (UIパーツ)
+  // 7. フィルタリング & 計算ロジック
   // ==========================================
-  if (!isAuthReady) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center bg-[#FDFCFB]">
-        <Loader2 className="animate-spin text-[#00A86B] mb-4" size={48} />
-        <p className="font-black text-stone-300 tracking-widest text-xs uppercase">Connecting to Clinic System...</p>
-      </div>
-    );
-  }
+  const currentMenu = useMemo(() => {
+    return menuItems.find(m => m.date === selectedDate && m.meal_type === activeMealType);
+  }, [menuItems, selectedDate, activeMealType]);
+
+  const todaysReservations = useMemo(() => {
+    return reservations.filter(r => r.date === selectedDate)
+      .sort((a, b) => a.meal_type === 'lunch' ? -1 : 1);
+  }, [reservations, selectedDate]);
+
+  // ==========================================
+  // 8. レンダリングコンポーネント
+  // ==========================================
+  if (!isAuthReady) return (
+    <div className="h-screen bg-[#FDFCFB] flex flex-col items-center justify-center">
+      <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
+        <RefreshCcw className="text-[#00A86B]" size={48} />
+      </motion.div>
+      <p className="mt-6 font-black text-stone-300 tracking-[0.3em] uppercase text-xs">Connecting Database...</p>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-[#FDFCFB] text-[#2D2D2D] font-sans selection:bg-[#00A86B]/10">
+    <div className="min-h-screen bg-[#FDFCFB] text-[#2D2D2D] font-sans selection:bg-[#00A86B]/10 selection:text-[#00A86B]">
       
-      {/* --- ヘッダー (image_79c220.jpg 準拠) --- */}
-      <header className="px-8 py-5 flex items-center justify-between bg-white border-b border-stone-50 sticky top-0 z-50">
-        <div className="flex items-center gap-4">
-          <div className="bg-[#00A86B] p-2.5 rounded-[1.2rem] text-white shadow-lg shadow-[#00A86B]/20">
-            <UtensilsCrossed size={26} />
-          </div>
-          <div className="leading-tight">
-            <h1 className="text-2xl font-black tracking-tighter">開聞クリニック</h1>
-            <p className="text-[10px] font-black text-stone-300 tracking-[0.15em] uppercase">Meal Order System</p>
+      {/* 共通ヘッダー (image_79c220.jpg 準拠) */}
+      <header className="px-10 py-7 flex items-center justify-between bg-white/80 backdrop-blur-xl border-b border-stone-100 sticky top-0 z-[100]">
+        <div className="flex items-center gap-6">
+          <motion.div 
+            whileHover={{ scale: 1.05 }}
+            className="bg-[#00A86B] p-3 rounded-[1.4rem] text-white shadow-2xl shadow-emerald-200"
+          >
+            <UtensilsCrossed size={30} />
+          </motion.div>
+          <div className="leading-none">
+            <h1 className="text-3xl font-black tracking-tighter">開聞クリニック</h1>
+            <p className="text-[10px] font-black text-stone-300 tracking-[0.25em] uppercase mt-2">Staff Meal Reservation</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           {user?.role === 'admin' && (
             <button 
-              onClick={() => setIsAdminView(!isAdminView)} 
-              className={`flex items-center gap-2 px-6 py-2.5 rounded-full text-xs font-black transition-all ${
-                isAdminView ? 'bg-[#00A86B] text-white shadow-lg' : 'bg-stone-50 text-stone-500 hover:bg-stone-100'
+              onClick={() => setIsAdminMode(!isAdminMode)}
+              className={`flex items-center gap-3 px-8 py-3.5 rounded-full text-xs font-black transition-all ${
+                isAdminMode ? 'bg-[#00A86B] text-white shadow-xl shadow-emerald-100' : 'bg-stone-50 text-stone-400 hover:bg-stone-100'
               }`}
             >
-              <Settings size={14} />
-              <span>{isAdminView ? '予約画面へ戻る' : '管理者メニュー'}</span>
+              {isAdminMode ? <Users size={16}/> : <Settings size={16}/>}
+              <span>{isAdminMode ? '現場画面へ戻る' : '管理者メニュー'}</span>
             </button>
           )}
           {user && (
-            <div className="flex items-center gap-4 ml-2 pl-6 border-l border-stone-100">
-              <div className="text-right hidden sm:block">
-                <p className="text-[8px] font-black text-stone-300 uppercase leading-none mb-1">Signed in as</p>
+            <div className="flex items-center gap-5 ml-4 pl-8 border-l border-stone-100">
+              <div className="text-right hidden md:block">
+                <p className="text-[9px] font-black text-stone-300 uppercase mb-1">Authenticated</p>
                 <p className="text-sm font-black text-stone-800">{user.name}</p>
               </div>
               <button 
-                onClick={() => signOut(auth)} 
-                className="p-2.5 text-stone-300 hover:text-rose-500 transition-colors bg-stone-50 rounded-xl"
+                onClick={() => signOut(auth)}
+                className="p-3.5 text-stone-300 hover:text-rose-500 transition-all bg-stone-50 rounded-2xl hover:bg-rose-50"
               >
-                <LogOut size={20} />
+                <LogOut size={22} />
               </button>
             </div>
           )}
         </div>
       </header>
 
-      <main className="max-w-[1400px] mx-auto p-6 md:p-10 lg:p-14">
+      <main className="max-w-[1600px] mx-auto p-8 md:p-14 lg:p-20">
         {!user ? (
-          /* --- ログイン画面 (image_77e8fe.png 準拠) --- */
-          <div className="max-w-md mx-auto mt-20 animate-in fade-in zoom-in duration-700">
-            <div className="bg-white p-14 rounded-[4rem] shadow-[0_40px_80px_-15px_rgba(0,0,0,0.08)] border border-stone-50 text-center">
-              <div className="w-24 h-24 bg-[#00A86B]/5 text-[#00A86B] rounded-[2.5rem] flex items-center justify-center mx-auto mb-10 shadow-inner">
-                <UserIcon size={48} />
+          /* ログイン画面 (image_77e8fe.png 準拠) */
+          <div className="max-w-xl mx-auto mt-10">
+            <motion.div 
+              initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }}
+              className="bg-white p-20 rounded-[5rem] shadow-[0_50px_100px_-20px_rgba(0,0,0,0.08)] border border-stone-50 text-center relative overflow-hidden"
+            >
+              <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-emerald-400 to-[#00A86B]"></div>
+              <div className="w-28 h-28 bg-emerald-50 text-[#00A86B] rounded-[3rem] flex items-center justify-center mx-auto mb-12 shadow-inner">
+                <UserIcon size={56} />
               </div>
-              <h2 className="text-3xl font-black mb-4 tracking-tighter">職員ログイン</h2>
-              <p className="text-stone-400 font-bold mb-12 leading-relaxed">
-                開聞クリニックの<br/>アカウントで認証してください
+              <h2 className="text-4xl font-black mb-6 tracking-tight">職員専用ログイン</h2>
+              <p className="text-stone-400 font-bold mb-16 text-lg leading-relaxed">
+                開聞クリニックの<br/>職員アカウントを使用して<br/>システムにアクセスしてください
               </p>
               <button 
-                onClick={() => signInWithPopup(auth, new GoogleAuthProvider())} 
-                className="w-full py-6 bg-[#1A1A1A] text-white rounded-[2.2rem] font-black text-lg flex items-center justify-center gap-4 hover:bg-black hover:scale-[1.02] transition-all shadow-xl"
+                onClick={() => signInWithPopup(auth, new GoogleAuthProvider())}
+                className="w-full py-8 bg-[#1A1A1A] text-white rounded-[2.8rem] font-black text-xl flex items-center justify-center gap-5 hover:bg-black hover:scale-[1.02] transition-all shadow-2xl active:scale-95"
               >
-                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="G" />
-                ログインして開始
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-7 h-7" alt="G" />
+                Googleでログイン
               </button>
-            </div>
+              <p className="mt-12 text-[10px] font-black text-stone-200 uppercase tracking-widest">Authorized Staff Only</p>
+            </motion.div>
           </div>
-        ) : isAdminView ? (
-          /* --- 管理者画面 (image_777104.png 等を統合) --- */
-          <div className="space-y-10 animate-in slide-in-from-right-8 duration-700">
-            <div className="flex flex-wrap gap-3 p-2 bg-stone-100/50 rounded-[2.5rem] w-fit">
-              {[
-                {id: 'menu', label: '献立管理', icon: Sparkles},
-                {id: 'report', label: '予約集計', icon: ClipboardList},
-                {id: 'users', label: '職員名簿', icon: UserIcon},
-                {id: 'settings', label: '設定', icon: Settings}
-              ].map((tab) => (
-                <button 
-                  key={tab.id} 
-                  onClick={() => setAdminTab(tab.id as any)}
-                  className={`flex items-center gap-3 px-10 py-3.5 rounded-full text-xs font-black transition-all ${
-                    adminTab === tab.id ? 'bg-[#00A86B] text-white shadow-xl scale-105' : 'text-stone-400 hover:text-stone-600'
-                  }`}
-                >
-                  <tab.icon size={16} /> {tab.label}
+        ) : isAdminMode ? (
+          /* 管理者ダッシュボード (image_777104.png 等を統合・強化) */
+          <div className="space-y-12 animate-in fade-in duration-700">
+            <div className="flex flex-wrap items-center justify-between gap-8">
+              <div className="flex gap-3 p-2 bg-stone-100/80 rounded-[2.8rem] border border-stone-200/50">
+                {[
+                  { id: 'menu', label: '献立管理', icon: CalendarDays },
+                  { id: 'analytics', label: '集計レポート', icon: BarChart3 },
+                  { id: 'staff', label: '職員名簿', icon: Users }
+                ].map((tab) => (
+                  <button 
+                    key={tab.id}
+                    onClick={() => setAdminActiveTab(tab.id as any)}
+                    className={`flex items-center gap-3 px-10 py-4 rounded-full text-xs font-black transition-all ${
+                      adminActiveTab === tab.id ? 'bg-[#00A86B] text-white shadow-xl scale-105' : 'text-stone-400 hover:text-stone-600'
+                    }`}
+                  >
+                    <tab.icon size={16} />
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+              
+              <div className="flex gap-4">
+                <button onClick={exportToCSV} className="bg-emerald-600 text-white px-8 py-4 rounded-[1.5rem] font-black text-sm flex items-center gap-3 hover:bg-emerald-700 shadow-xl shadow-emerald-100 transition-all">
+                  <Download size={18} /> CSV保存
                 </button>
-              ))}
+                <button onClick={() => setIsAddingMenu(true)} className="bg-stone-900 text-white px-8 py-4 rounded-[1.5rem] font-black text-sm flex items-center gap-3 hover:bg-black shadow-xl transition-all">
+                  <Plus size={18} /> 新規献立
+                </button>
+              </div>
             </div>
 
-            <div className="bg-white p-10 md:p-14 rounded-[4rem] border border-stone-50 shadow-sm min-h-[600px]">
-              {adminTab === 'menu' && (
+            <div className="bg-white p-16 rounded-[5rem] border border-stone-50 shadow-sm min-h-[700px]">
+              {adminActiveTab === 'menu' && (
                 <div className="space-y-12">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-3xl font-black tracking-tight">献立の管理</h3>
-                    <button className="bg-stone-900 text-white px-8 py-4 rounded-2xl font-black text-sm flex items-center gap-3 hover:bg-black transition-all">
-                      <Plus size={18} /> 新規登録
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {menu.length > 0 ? menu.slice().reverse().map(m => (
-                      <div key={m.id} className="p-8 bg-stone-50 rounded-[2.5rem] border border-stone-100 flex justify-between items-start group hover:bg-white hover:shadow-xl transition-all">
-                        <div>
-                          <span className={`px-4 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${
-                            m.meal_type === 'lunch' ? 'bg-orange-100 text-orange-600' : 'bg-indigo-100 text-indigo-600'
-                          }`}>
-                            {m.meal_type}
-                          </span>
-                          <p className="text-xs font-black text-stone-300 mt-4 mb-1">{m.date}</p>
-                          <p className="text-xl font-black text-stone-800">{m.title}</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    {menuItems.map(m => (
+                      <div key={m.id} className="group p-10 bg-stone-50 rounded-[3.5rem] border border-stone-100 hover:bg-white hover:shadow-2xl hover:border-transparent transition-all relative overflow-hidden">
+                        <div className={`absolute top-0 right-0 px-6 py-2 rounded-bl-[1.5rem] text-[9px] font-black uppercase tracking-widest ${
+                          m.meal_type === 'lunch' ? 'bg-orange-100 text-orange-600' : 'bg-indigo-100 text-indigo-600'
+                        }`}>
+                          {m.meal_type}
                         </div>
-                        <button 
-                          onClick={() => deleteDoc(doc(db, 'menu', m.id!))}
-                          className="text-stone-200 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all"
-                        >
-                          <Trash2 size={20} />
-                        </button>
+                        <p className="text-[10px] font-black text-[#00A86B] mb-3">{m.date}</p>
+                        <h4 className="text-2xl font-black text-stone-800 tracking-tighter mb-6">{m.title}</h4>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[9px] font-black text-stone-300 italic">Added by {m.createdBy || 'System'}</span>
+                          <button onClick={() => deleteDoc(doc(db, 'menu', m.id!))} className="text-stone-200 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all">
+                            <Trash2 size={20} />
+                          </button>
+                        </div>
                       </div>
-                    )) : (
-                      <div className="col-span-full py-20 text-center text-stone-300 font-black italic">献立が登録されていません</div>
-                    )}
+                    ))}
                   </div>
                 </div>
               )}
 
-              {adminTab === 'report' && (
+              {adminActiveTab === 'analytics' && (
                 <div className="space-y-12">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-3xl font-black tracking-tight">予約・喫食集計</h3>
-                    <button 
-                      onClick={exportToCSV}
-                      className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-black text-sm flex items-center gap-3 hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
-                    >
-                      <FileDown size={18} /> CSV出力
-                    </button>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
+                    <div className="p-10 bg-emerald-50 rounded-[3rem] border border-emerald-100">
+                      <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-2">Total Reservations</p>
+                      <p className="text-5xl font-black text-emerald-700">{reservations.length}</p>
+                    </div>
+                    <div className="p-10 bg-orange-50 rounded-[3rem] border border-orange-100">
+                      <p className="text-[10px] font-black text-orange-600 uppercase tracking-widest mb-2">Consumption Rate</p>
+                      <p className="text-5xl font-black text-orange-700">
+                        {reservations.length > 0 ? Math.round((reservations.filter(r => r.consumed).length / reservations.length) * 100) : 0}%
+                      </p>
+                    </div>
                   </div>
-                  <div className="overflow-hidden rounded-[2.5rem] border border-stone-100 shadow-inner">
+                  <div className="rounded-[3rem] border border-stone-100 overflow-hidden">
                     <table className="w-full text-left">
-                      <thead className="bg-stone-50 text-[10px] font-black text-stone-400 uppercase tracking-widest">
+                      <thead className="bg-stone-50 text-[10px] font-black text-stone-400 uppercase tracking-[0.2em]">
                         <tr>
-                          <th className="px-10 py-6">日付</th>
-                          <th className="px-10 py-6">職員名</th>
-                          <th className="px-10 py-6">メニュー</th>
-                          <th className="px-10 py-6 text-center">喫食状況</th>
+                          <th className="px-10 py-7">日付</th>
+                          <th className="px-10 py-7">職員</th>
+                          <th className="px-10 py-7">メニュー</th>
+                          <th className="px-10 py-7 text-center">状態</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-stone-50">
-                        {reservations.map(res => (
-                          <tr key={res.id} className="hover:bg-stone-50/50 transition-colors">
-                            <td className="px-10 py-6 font-bold text-stone-500">{res.date}</td>
-                            <td className="px-10 py-6 font-black text-stone-800">{res.user_name}</td>
-                            <td className="px-10 py-6 font-black text-stone-800">{res.title}</td>
+                        {reservations.slice(0, 50).map(r => (
+                          <tr key={r.id} className="hover:bg-stone-50/50 transition-all">
+                            <td className="px-10 py-6 text-xs font-bold text-stone-400">{r.date}</td>
+                            <td className="px-10 py-6 font-black text-stone-800">{r.user_name}</td>
+                            <td className="px-10 py-6 font-black text-stone-600">{r.title}</td>
                             <td className="px-10 py-6 text-center">
-                              {res.consumed ? 
-                                <span className="bg-emerald-100 text-emerald-600 px-4 py-1.5 rounded-full text-[10px] font-black">完了</span> : 
-                                <span className="bg-stone-100 text-stone-400 px-4 py-1.5 rounded-full text-[10px] font-black">未</span>
+                              {r.consumed ? 
+                                <span className="bg-emerald-100 text-emerald-600 px-4 py-1.5 rounded-full text-[9px] font-black">喫食済</span> :
+                                <span className="bg-stone-100 text-stone-300 px-4 py-1.5 rounded-full text-[9px] font-black">未喫食</span>
                               }
                             </td>
                           </tr>
@@ -404,172 +462,192 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* --- メイン予約画面 (2カラム: image_79c220.jpg を100%再現) --- */
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 animate-in slide-in-from-bottom-8 duration-1000">
+          /* 現場画面 (image_79c220.jpg 100%再現・省略なし) */
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-20 items-start animate-in slide-in-from-bottom-12 duration-1000">
             
-            {/* 左カラム: 献立予約 (最優先パネル) */}
-            <div className="space-y-10">
-              <section className="bg-white p-10 md:p-14 rounded-[5rem] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.06)] border border-stone-50 flex flex-col min-h-[700px]">
-                <div className="flex flex-col md:flex-row md:items-center justify-between mb-14 gap-8">
-                  <h3 className="text-4xl font-black flex items-center gap-5 tracking-tighter">
-                    <div className="bg-orange-50 text-orange-600 p-4 rounded-[1.8rem] shadow-inner">
-                      <Calendar size={32} />
+            {/* 左：献立予約セクション */}
+            <div className="space-y-12">
+              <section className="bg-white p-12 md:p-16 rounded-[5.5rem] shadow-[0_50px_100px_-30px_rgba(0,0,0,0.07)] border border-stone-50 flex flex-col min-h-[850px] relative overflow-hidden">
+                <div className="flex flex-col md:flex-row md:items-center justify-between mb-20 gap-10">
+                  <h3 className="text-5xl font-black flex items-center gap-6 tracking-tighter">
+                    <div className="text-orange-600 bg-orange-50 p-5 rounded-[2.2rem] shadow-inner">
+                      <Calendar size={40}/>
                     </div>
                     献立予約
                   </h3>
-                  <div className="flex bg-stone-100/80 p-2 rounded-[2.2rem] self-start border border-stone-200/50">
-                    <button 
-                      onClick={() => setSelectedMealType('lunch')} 
-                      className={`px-12 py-4 rounded-[1.8rem] text-sm font-black transition-all active:scale-95 ${
-                        selectedMealType === 'lunch' ? 'bg-white text-orange-600 shadow-xl scale-105' : 'text-stone-400 hover:text-stone-500'
-                      }`}
-                    >
-                      昼食
-                    </button>
-                    <button 
-                      onClick={() => setSelectedMealType('dinner')} 
-                      className={`px-12 py-4 rounded-[1.8rem] text-sm font-black transition-all active:scale-95 ${
-                        selectedMealType === 'dinner' ? 'bg-white text-indigo-600 shadow-xl scale-105' : 'text-stone-400 hover:text-stone-500'
-                      }`}
-                    >
-                      夕食
-                    </button>
+                  <div className="flex bg-stone-100/80 p-3 rounded-[2.5rem] border border-stone-200/50 self-start shadow-inner">
+                    {[MEAL_TYPES.LUNCH, MEAL_TYPES.DINNER].map((type) => (
+                      <button 
+                        key={type} 
+                        onClick={() => setActiveMealType(type)}
+                        className={`px-16 py-5 rounded-[2rem] text-sm font-black transition-all active:scale-95 ${
+                          activeMealType === type ? 'bg-white text-orange-600 shadow-2xl scale-105' : 'text-stone-400 hover:text-stone-500'
+                        }`}
+                      >
+                        {type === 'lunch' ? '昼食' : '夕食'}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
-                <div className={`flex-1 rounded-[4.5rem] p-12 border-2 flex flex-col transition-all duration-700 ${
-                  reservations.some(r => r.date === selectedDate && r.meal_type === selectedMealType) 
-                  ? 'bg-[#00A86B]/5 border-[#00A86B]/10 shadow-inner' : 'bg-stone-50 border-stone-100'
+                <div className={`flex-1 rounded-[5rem] p-16 border-2 flex flex-col transition-all duration-700 ${
+                  reservations.some(r => r.date === selectedDate && r.meal_type === activeMealType) 
+                  ? 'bg-[#00A86B]/5 border-[#00A86B]/20 shadow-inner' : 'bg-stone-50/50 border-stone-100'
                 }`}>
-                  <div className="relative mb-14">
+                  <div className="mb-20">
                     <input 
                       type="date" 
                       value={selectedDate} 
-                      onChange={(e) => setSelectedDate(e.target.value)} 
-                      className="bg-white px-10 py-6 rounded-[2.5rem] font-black text-stone-800 shadow-2xl shadow-stone-200/60 border-none outline-none ring-4 ring-transparent focus:ring-[#00A86B]/10 transition-all text-xl w-full sm:w-auto" 
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                      className="bg-white px-12 py-7 rounded-[3rem] font-black text-stone-800 shadow-2xl shadow-stone-200/50 border-none outline-none ring-[12px] ring-transparent focus:ring-[#00A86B]/5 transition-all text-3xl w-full sm:w-auto text-center" 
                     />
                   </div>
                   
-                  {menu.find(m => m.date === selectedDate && m.meal_type === selectedMealType) ? (
-                    <div className="flex-1 flex flex-col justify-between space-y-16">
-                      <div className="animate-in fade-in slide-in-from-left-6">
-                        <span className="text-[10px] font-black text-[#00A86B] uppercase tracking-[0.4em] mb-6 block bg-[#00A86B]/10 w-fit px-5 py-1.5 rounded-full">Menu of the day</span>
-                        <p className="text-6xl font-black text-stone-800 leading-[1.1] tracking-tighter">
-                          {menu.find(m => m.date === selectedDate && m.meal_type === selectedMealType)?.title}
+                  {currentMenu ? (
+                    <div className="flex-1 flex flex-col justify-between space-y-24">
+                      <motion.div 
+                        key={currentMenu.id}
+                        initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }}
+                        className="duration-700"
+                      >
+                        <span className="text-[11px] font-black text-[#00A86B] uppercase tracking-[0.5em] mb-10 block bg-[#00A86B]/10 w-fit px-8 py-2.5 rounded-full shadow-sm">Today's Selected Menu</span>
+                        <p className="text-8xl font-black text-stone-800 leading-[0.95] tracking-tighter">
+                          {currentMenu.title}
                         </p>
-                      </div>
+                        {currentMenu.calories && (
+                          <p className="mt-8 text-stone-400 font-bold flex items-center gap-3">
+                            <Info size={18}/> 概算熱量: {currentMenu.calories} kcal
+                          </p>
+                        )}
+                      </motion.div>
                       
-                      {/* 予約・取消ボタン (配色は image_79c220.jpg に準拠) */}
-                      {reservations.some(r => r.menu_id === menu.find(m => m.date === selectedDate && m.meal_type === selectedMealType)?.id) ? (
-                        <button 
-                          onClick={() => handleToggleReservation(menu.find(m => m.date === selectedDate && m.meal_type === selectedMealType)!)}
-                          className="w-full py-12 rounded-[3.5rem] font-black text-4xl bg-[#FF2D55] text-white shadow-[0_25px_50px_-12px_rgba(255,45,85,0.4)] hover:bg-[#E6294D] active:scale-95 transition-all"
-                        >
-                          予約取消
-                        </button>
-                      ) : (
-                        <button 
-                          onClick={() => handleToggleReservation(menu.find(m => m.date === selectedDate && m.meal_type === selectedMealType)!)}
-                          className="w-full py-12 rounded-[3.5rem] font-black text-4xl bg-[#00A86B] text-white shadow-[0_25px_50px_-12px_rgba(0,168,107,0.4)] hover:bg-[#008F5B] active:scale-95 transition-all"
-                        >
-                          予約を確定
-                        </button>
-                      )}
+                      {/* メインアクションボタン：あのピンクとグリーンの究極の再現 */}
+                      <AnimatePresence mode="wait">
+                        {reservations.some(r => r.menu_id === currentMenu.id) ? (
+                          <motion.button 
+                            key="cancel"
+                            initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.1 }}
+                            onClick={() => toggleReservation(currentMenu)}
+                            disabled={isLoading}
+                            className="w-full py-14 rounded-[4rem] font-black text-6xl bg-[#FF2D55] text-white shadow-[0_40px_80px_-20px_rgba(255,45,85,0.45)] hover:bg-[#E6294D] active:scale-95 transition-all flex items-center justify-center gap-6"
+                          >
+                            {isLoading ? <Loader2 className="animate-spin" size={48}/> : '予約取消'}
+                          </motion.button>
+                        ) : (
+                          <motion.button 
+                            key="confirm"
+                            initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 1.1 }}
+                            onClick={() => toggleReservation(currentMenu)}
+                            disabled={isLoading}
+                            className="w-full py-14 rounded-[4rem] font-black text-6xl bg-[#00A86B] text-white shadow-[0_40px_80px_-20px_rgba(0,168,107,0.45)] hover:bg-[#008F5B] active:scale-95 transition-all flex items-center justify-center gap-6"
+                          >
+                            {isLoading ? <Loader2 className="animate-spin" size={48}/> : '予約を確定'}
+                          </motion.button>
+                        )}
+                      </AnimatePresence>
                     </div>
                   ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center py-20 opacity-20">
-                      <UtensilsCrossed size={80} className="text-stone-300 mb-6" />
-                      <p className="text-stone-400 font-black text-2xl italic">献立がありません</p>
+                    <div className="flex-1 flex flex-col items-center justify-center text-center py-32 opacity-10">
+                      <Database size={150} className="text-stone-300 mb-12" />
+                      <p className="text-stone-400 font-black text-4xl tracking-tight leading-relaxed italic">
+                        指定された日付の献立データが<br/>見つかりません
+                      </p>
                     </div>
                   )}
                 </div>
               </section>
             </div>
 
-            {/* 右カラム: 本日の喫食確認 (リアルタイムリスト) */}
-            <div className="space-y-10">
-              <section className="bg-white p-10 md:p-14 rounded-[5rem] shadow-[0_40px_80px_-20px_rgba(0,0,0,0.06)] border border-stone-50 h-full flex flex-col">
-                <div className="flex items-center justify-between mb-14">
-                  <h3 className="text-4xl font-black flex items-center gap-5 tracking-tighter">
-                    <div className="bg-emerald-50 text-[#00A86B] p-4 rounded-[1.8rem] shadow-inner">
-                      <ClipboardList size={32} />
+            {/* 右：本日の喫食確認セクション */}
+            <div className="space-y-12">
+              <section className="bg-white p-12 md:p-16 rounded-[5.5rem] shadow-[0_50px_100px_-30px_rgba(0,0,0,0.07)] border border-stone-50 h-full min-h-[850px] flex flex-col">
+                <div className="flex items-center justify-between mb-20">
+                  <h3 className="text-5xl font-black flex items-center gap-6 tracking-tighter">
+                    <div className="text-[#00A86B] bg-emerald-50 p-5 rounded-[2.2rem] shadow-inner">
+                      <ClipboardList size={40}/>
                     </div>
                     本日の喫食確認
                   </h3>
-                  <div className="flex items-center gap-3 bg-emerald-50 px-6 py-3 rounded-full border border-emerald-100">
-                    <div className="w-2.5 h-2.5 bg-[#00A86B] rounded-full animate-pulse shadow-[0_0_12px_rgba(0,168,107,0.5)]"></div>
-                    <span className="text-[10px] font-black text-[#00A86B] uppercase tracking-widest">Live Sync</span>
+                  <div className="flex items-center gap-4 bg-emerald-50 px-8 py-4 rounded-full border border-emerald-100 shadow-sm">
+                    <div className="w-4 h-4 bg-[#00A86B] rounded-full animate-pulse shadow-[0_0_20px_rgba(0,168,107,0.6)]"></div>
+                    <span className="text-xs font-black text-[#00A86B] uppercase tracking-[0.2em] leading-none">Cloud Sync</span>
                   </div>
                 </div>
 
-                <div className="flex-1 space-y-6 overflow-y-auto pr-2 custom-scrollbar">
-                  {reservations.filter(r => r.date === selectedDate).length > 0 ? (
-                    <AnimatePresence mode="popLayout" initial={false}>
-                      {reservations.filter(r => r.date === selectedDate).map(res => (
+                <div className="flex-1 space-y-8 overflow-y-auto pr-4 custom-scrollbar">
+                  <AnimatePresence mode="popLayout" initial={false}>
+                    {todaysReservations.length > 0 ? (
+                      todaysReservations.map(res => (
                         <motion.div 
                           key={res.id} 
                           layout 
-                          initial={{ opacity: 0, x: 20 }} 
-                          animate={{ opacity: 1, x: 0 }} 
-                          exit={{ opacity: 0, scale: 0.95 }}
-                          className={`flex items-center justify-between p-10 rounded-[3.5rem] border-2 transition-all ${
-                            res.consumed ? 'bg-[#00A86B]/5 border-[#00A86B]/10' : 'bg-white border-stone-50 shadow-sm'
+                          initial={{ opacity: 0, y: 30 }} 
+                          animate={{ opacity: 1, y: 0 }} 
+                          exit={{ opacity: 0, scale: 0.9 }}
+                          className={`flex items-center justify-between p-14 rounded-[4.5rem] border-2 transition-all group ${
+                            res.consumed ? 'bg-[#00A86B]/5 border-[#00A86B]/20 shadow-inner' : 'bg-white border-stone-50 shadow-xl shadow-stone-100/40'
                           }`}
                         >
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-5">
-                              <span className={`w-3.5 h-3.5 rounded-full shadow-sm ${
+                          <div className="space-y-4">
+                            <div className="flex items-center gap-8">
+                              <span className={`w-5 h-5 rounded-full shadow-inner ${
                                 res.meal_type === 'lunch' ? 'bg-orange-400' : 'bg-indigo-400'
                               }`}></span>
-                              <p className="font-black text-stone-800 text-3xl tracking-tighter">{res.title}</p>
+                              <p className="font-black text-stone-800 text-5xl tracking-tighter leading-none">{res.title}</p>
                             </div>
-                            <div className="flex items-center gap-3 pl-9">
-                              <p className="text-[10px] font-black text-stone-300 uppercase tracking-widest leading-none">
+                            <div className="flex items-center gap-6 pl-14">
+                              <p className="text-xs font-black text-stone-300 uppercase tracking-[0.3em] leading-none">
                                 {res.meal_type} / {res.user_name}
                               </p>
                               {res.consumed && (
-                                <span className="flex items-center gap-1 text-[#00A86B] text-[10px] font-black bg-[#00A86B]/10 px-2 py-0.5 rounded-md">
-                                  <Check size={12}/> OK
-                                </span>
+                                <motion.span 
+                                  initial={{ scale: 0 }} animate={{ scale: 1 }}
+                                  className="flex items-center gap-2 text-[#00A86B] text-[11px] font-black bg-[#00A86B]/15 px-4 py-1.5 rounded-xl border border-[#00A86B]/10"
+                                >
+                                  <Check size={16} strokeWidth={4}/> 完了
+                                </motion.span>
                               )}
                             </div>
                           </div>
+                          
+                          {/* 確認完了ボタン：グリーンと白の切り替えデザイン */}
                           <button 
-                            onClick={() => handleToggleConsumed(res.id, res.consumed)}
-                            className={`px-12 py-6 rounded-[2.2rem] font-black text-xl transition-all shadow-lg active:scale-90 ${
+                            onClick={() => toggleConsumedStatus(res)}
+                            className={`px-16 py-8 rounded-[3rem] font-black text-3xl transition-all shadow-[0_20px_40px_-10px_rgba(0,0,0,0.1)] active:scale-90 ${
                               res.consumed 
-                              ? 'bg-[#00A86B] text-white shadow-[#00A86B]/20' 
-                              : 'bg-white text-[#00A86B] border-2 border-[#00A86B] hover:bg-[#00A86B] hover:text-white'
+                              ? 'bg-[#00A86B] text-white shadow-emerald-200' 
+                              : 'bg-white text-[#00A86B] border-[4px] border-[#00A86B] hover:bg-[#00A86B] hover:text-white'
                             }`}
                           >
-                            <span className="flex items-center gap-3">
-                              {res.consumed ? <CheckCircle2 size={24} /> : null}
+                            <span className="flex items-center gap-5">
+                              {res.consumed ? <CheckCircle2 size={32} /> : null}
                               {res.consumed ? '完了' : '確認'}
                             </span>
                           </button>
                         </motion.div>
-                      ))}
-                    </AnimatePresence>
-                  ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center py-32 opacity-10">
-                      <FileText size={100} className="text-stone-300 mb-8" />
-                      <p className="text-stone-400 font-black text-2xl tracking-tight leading-relaxed">
-                        本日の予約データは<br/>まだありません
-                      </p>
-                    </div>
-                  )}
+                      ))
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-center py-48 opacity-15">
+                        <HardDrive size={180} className="text-stone-300 mb-12" />
+                        <p className="text-stone-400 font-black text-4xl tracking-tight leading-relaxed">
+                          本日の予約は<br/>登録されていません
+                        </p>
+                      </div>
+                    )}
+                  </AnimatePresence>
                 </div>
                 
-                <div className="mt-14 p-10 bg-stone-50 rounded-[3.5rem] border border-stone-100">
-                  <div className="flex items-start gap-4">
-                    <Info className="text-[#00A86B] shrink-0 mt-1" size={24} />
-                    <div>
-                      <p className="text-[10px] font-black text-stone-400 uppercase tracking-widest mb-2">Notice</p>
-                      <p className="text-sm font-bold text-stone-600 leading-relaxed italic">
-                        喫食の確認は、配膳時または食後に行ってください。<br/>
-                        正確な集計は食材ロスの削減に繋がります。
-                      </p>
-                    </div>
+                {/* 現場職員への通知パネル */}
+                <div className="mt-20 p-14 bg-stone-50/80 rounded-[4.5rem] border border-stone-100 shadow-inner flex items-start gap-8">
+                  <div className="bg-white p-5 rounded-[1.8rem] shadow-xl text-[#00A86B]">
+                    <ShieldCheck size={36} />
+                  </div>
+                  <div>
+                    <p className="text-[12px] font-black text-stone-400 uppercase tracking-[0.4em] mb-4">Quality & Safety</p>
+                    <p className="text-lg font-bold text-stone-600 leading-relaxed italic">
+                      喫食確認は、必ず配膳時に行い、データの正確性を維持してください。<br/>
+                      システムに関する不明点は教育委員会まで。
+                    </p>
                   </div>
                 </div>
               </section>
@@ -578,30 +656,35 @@ export default function App() {
         )}
       </main>
 
-      {/* --- トースト通知 (アニメーション付き) --- */}
+      {/* グローバルトースト (全画面通知) */}
       <AnimatePresence>
-        {toast && (
+        {globalToast && (
           <motion.div 
-            initial={{ opacity: 0, y: 50 }} 
-            animate={{ opacity: 1, y: 0 }} 
-            exit={{ opacity: 0, y: 20 }} 
-            className="fixed bottom-10 left-0 right-0 flex justify-center z-[100] pointer-events-none"
+            initial={{ opacity: 0, y: 80, scale: 0.9 }} 
+            animate={{ opacity: 1, y: 0, scale: 1 }} 
+            exit={{ opacity: 0, scale: 0.8, y: 40 }} 
+            className="fixed bottom-16 left-0 right-0 flex justify-center z-[1000] pointer-events-none"
           >
-            <div className={`px-10 py-6 rounded-full shadow-2xl flex items-center gap-4 pointer-events-auto ${
-              toast.type === 'error' ? 'bg-rose-500 text-white' : 'bg-[#1A1A1A] text-white'
+            <div className={`px-16 py-8 rounded-[3.5rem] shadow-[0_40px_100px_-15px_rgba(0,0,0,0.4)] flex items-center gap-6 pointer-events-auto border-4 ${
+              globalToast.type === 'error' ? 'bg-rose-500 border-rose-400 text-white' : 'bg-[#1A1A1A] border-stone-800 text-white'
             }`}>
-              {toast.type === 'error' ? <AlertCircle size={24}/> : <CheckCircle2 size={24}/>}
-              <span className="font-black text-lg">{toast.message}</span>
+              {globalToast.type === 'error' ? <AlertCircle size={36}/> : <CheckCircle2 size={36} className="text-[#00A86B]"/>}
+              <span className="font-black text-2xl tracking-tight">{globalToast.msg}</span>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
+      {/* スタイル調整 */}
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #E5E5E5; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #D1D1D1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #EDEDED; border-radius: 30px; border: 2px solid white; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #D8D8D8; }
+        input[type="date"]::-webkit-calendar-picker-indicator {
+          cursor: pointer;
+          filter: invert(0.5);
+        }
       `}</style>
     </div>
   );
