@@ -814,7 +814,7 @@ function AppContent() {
     if (!file) return;
 
     // Check for API key before starting
-    const hasApiKey = manualApiKey || (process.env as any).GEMINI_API_KEY;
+   const hasApiKey = manualApiKey && manualApiKey.trim() !== '';
     if (!hasApiKey) {
       showToast('AI解析にはAPIキーの設定が必要です。右上の設定アイコンから設定してください。', 'error');
       if (fileInputRef.current) fileInputRef.current.value = '';
