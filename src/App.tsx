@@ -215,9 +215,42 @@ function AppContent() {
   const [isScanning, setIsScanning] = useState(false);
   const [pendingMenus, setPendingMenus] = useState<Partial<MenuItem>[]>([]);
   const [viewMode, setViewMode] = useState<'calendar' | 'list'>('calendar');
+  const [viewDate, setViewDate] = useState(new Date());
+  const [adminStats, setAdminStats] = useState<any[]>([]);
+  const [monthlyReport, setMonthlyReport] = useState<any[]>([]);
+  const [dailyChecklist, setDailyChecklist] = useState<any[]>([]);
+  const [checklistDate, setChecklistDate] = useState(formatDate(new Date()));
+  const [reportMonth, setReportMonth] = useState(formatDate(new Date()).slice(0, 7));
+  const [adminUsers, setAdminUsers] = useState<User[]>([]);
+  const [adminTab, setAdminTab] = useState<'menu' | 'students' | 'report'>('menu');
+  const [isGuestMode, setIsGuestMode] = useState(false);
+  const [isSelfCheckMode, setIsSelfCheckMode] = useState(false);
+  const [selfCheckSearch, setSelfCheckSearch] = useState('');
+  const [selfCheckMealFilter, setSelfCheckMealFilter] = useState<'all' | 'lunch' | 'dinner'>('all');
+  const [guestName, setGuestName] = useState('');
+  const [isReservingGuest, setIsReservingGuest] = useState(false);
+  const [newUser, setNewUser] = useState({ username: '', name: '', role: 'student' as 'student' | 'admin' });
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ 
+    isOpen: boolean, 
+    title: string, 
+    message: string, 
+    confirmText?: string,
+    cancelText?: string,
+    onConfirm: () => void
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuCsvInputRef = useRef<HTMLInputElement>(null);
   const menuDetailRef = useRef<HTMLDivElement>(null);
+  const userFileInputRef = useRef<HTMLInputElement>(null);
   const lastClickTimeRef = useRef<{ [key: string]: number }>({});
 
   // --- Firebase Auth & Firestore Sync ---
@@ -279,9 +312,9 @@ function AppContent() {
       handleFirestoreError(error, OperationType.LIST, 'menu');
     });
 
-    // Reservations (filtered by user if not admin)
+    // Reservations (filtered by user if not admin or self-check)
     let qRes;
-    if (user?.role === 'admin') {
+    if (user?.role === 'admin' || isSelfCheckMode) {
       qRes = query(collection(db, 'reservations'));
     } else if (user) {
       qRes = query(collection(db, 'reservations'), where('user_id', '==', user.id));
@@ -301,7 +334,7 @@ function AppContent() {
       unsubscribeMenu();
       unsubscribeRes();
     };
-  }, [isAuthReady, user?.id, user?.role]);
+  }, [isAuthReady, user?.id, user?.role, isSelfCheckMode]);
 
   const handleGoogleLogin = async () => {
     try {
@@ -444,37 +477,6 @@ function AppContent() {
     return days;
   };
 
-  const [viewDate, setViewDate] = useState(new Date());
-  const [adminStats, setAdminStats] = useState<any[]>([]);
-  const [monthlyReport, setMonthlyReport] = useState<any[]>([]);
-  const [dailyChecklist, setDailyChecklist] = useState<any[]>([]);
-  const [checklistDate, setChecklistDate] = useState(formatDate(new Date()));
-  const [reportMonth, setReportMonth] = useState(formatDate(new Date()).slice(0, 7));
-  const [adminUsers, setAdminUsers] = useState<User[]>([]);
-  const [adminTab, setAdminTab] = useState<'menu' | 'students' | 'report'>('menu');
-  const [isGuestMode, setIsGuestMode] = useState(false);
-  const [isSelfCheckMode, setIsSelfCheckMode] = useState(false);
-  const [selfCheckSearch, setSelfCheckSearch] = useState('');
-  const [selfCheckMealFilter, setSelfCheckMealFilter] = useState<'all' | 'lunch' | 'dinner'>('all');
-  const [guestName, setGuestName] = useState('');
-  const [isReservingGuest, setIsReservingGuest] = useState(false);
-  const [newUser, setNewUser] = useState({ username: '', name: '', role: 'student' as 'student' | 'admin' });
-  const [editingUser, setEditingUser] = useState<User | null>(null);
-  const [isImporting, setIsImporting] = useState(false);
-  const userFileInputRef = useRef<HTMLInputElement>(null);
-  const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
-  const [confirmModal, setConfirmModal] = useState<{ 
-    isOpen: boolean, 
-    title: string, 
-    message: string, 
-    confirmText?: string,
-    cancelText?: string,
-    showInput?: boolean,
-    inputValue?: string,
-    isTesting?: boolean,
-    onConfirm: (val?: string) => void 
-  }>({ isOpen: false, title: '', message: '', onConfirm: () => {} });
-
   const [manualApiKey, setManualApiKey] = useState<string>(() => safeStorage.getItem('manual_gemini_api_key') || '');
 
   useEffect(() => {
@@ -502,7 +504,7 @@ function AppContent() {
   });
 
   useEffect(() => {
-    if (isAdminView) {
+    if (isAdminView || isSelfCheckMode) {
       const unsubscribeUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
         const usersData = snapshot.docs.map(doc => doc.data() as User);
         setAdminUsers(usersData);
@@ -511,7 +513,7 @@ function AppContent() {
       });
       return () => unsubscribeUsers();
     }
-  }, [isAdminView]);
+  }, [isAdminView, isSelfCheckMode]);
 
   useEffect(() => {
     if (isAdminView && menu.length > 0) {
@@ -562,7 +564,7 @@ function AppContent() {
   }, [isAdminView, menu, reservations, adminUsers, reportMonth]);
 
   useEffect(() => {
-    if (isAdminView && checklistDate) {
+    if ((isAdminView || isSelfCheckMode) && checklistDate) {
       const dayMenus = menu.filter(m => m.date === checklistDate);
       const dayMenuIds = dayMenus.map(m => m.id);
       
@@ -581,7 +583,7 @@ function AppContent() {
         });
       setDailyChecklist(checklist);
     }
-  }, [isAdminView, menu, reservations, adminUsers, checklistDate]);
+  }, [isAdminView, isSelfCheckMode, menu, reservations, adminUsers, checklistDate]);
 
   const handleGuestReservation = async (menuId: string) => {
     if (!guestName.trim()) {
@@ -616,17 +618,9 @@ function AppContent() {
 
   const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
     try {
-      // 1. データベース（Firestore）を更新
       await updateDoc(doc(db, 'reservations', reservationId), {
         consumed: !currentStatus
       });
-
-      // 2. ★ここを追加：画面の状態（State）を即座に更新する
-      setReservations(prev => prev.map(res => 
-        res.id === reservationId ? { ...res, consumed: !currentStatus } : res
-      ));
-
-      // 成功時のメッセージ表示
       if (!currentStatus) {
         showToast('喫食を確認しました。召し上がれ！');
       }
@@ -1050,6 +1044,14 @@ function AppContent() {
 
           {isSelfCheckMode ? (
             <div className="space-y-6">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-2xl font-black text-stone-800 tracking-tight">喫食チェック</h2>
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-full border border-emerald-100">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider">リアルタイム同期中</span>
+                </div>
+              </div>
+
               {/* Today's Menu Info */}
               {Array.isArray(menu) && menu.filter(m => m && m.date === formatDate(new Date())).length > 0 && (
                 <div className="bg-emerald-50 border border-emerald-100 rounded-3xl p-5 space-y-3">
