@@ -616,21 +616,28 @@ function AppContent() {
 
   const toggleConsumed = async (reservationId: string, currentStatus: boolean) => {
     try {
-      // 1. データベース（Firestore）を更新
+      // 1. Firebaseのデータを更新
       await updateDoc(doc(db, 'reservations', reservationId), {
         consumed: !currentStatus
       });
 
-      // 2. ★ここを追加：画面の状態（State）を即座に更新する
+      // 2. 画面上の表示を即座に更新
       setReservations(prev => prev.map(res => 
         res.id === reservationId ? { ...res, consumed: !currentStatus } : res
       ));
 
-      // 成功時のメッセージ表示
       if (!currentStatus) {
         showToast('喫食を確認しました。召し上がれ！');
+      } else {
+        showToast('喫食チェックを取り消しました');
       }
     } catch (error) {
+      console.error("更新エラー:", error);
+      handleFirestoreError(error, OperationType.UPDATE, `reservations/${reservationId}`, showToast);
+    }
+  };
+
+  const handleAddUser = async (e: FormEvent) => {
       handleFirestoreError(error, OperationType.UPDATE, `reservations/${reservationId}`);
     }
   };
